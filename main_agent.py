@@ -1,43 +1,27 @@
-## OODA
+#!/usr/bin/env python3
+"""
+Interactive hiring research agent — single-shot CLI entry point.
 
-## Observe - gather sensor data
-
-### Orient - sythesize sensor data - send the data actually to the language model - assemble the context for the language model
-
-### Decide - <think> ok the user wants me to... </think> ok I'll do that thing
-
-## Act - Do The Thing - tool calls, aka generate json that parses
-
-import logging
+Runs one prompt through the Groq-backed research agent with all available tools
+(Tavily web search + hiring intel PostgreSQL ops).
+"""
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s %(name)s %(message)s",
-)
+from logging_config import configure_logging
+
+configure_logging()
 
 from prompting import prompt
 from tools import tool_definitions
 
-
-print(prompt("Find me interesting CTO or Director of Engineering roles, preferably with Python and JavaScript, preferably in EdTech", tools=tool_definitions))
-
-## Job Searching Agent
-
-##### What does it need in terms of sensor data
-### My Resume and Parameters on my Search
-### A prompt that explains how to search
-
-##### What tools does it need?
-### a web search tool
-### A place to store jobs that we've found for further analysis & to apply
-
-
-##### Prompt
-
-
-##### Handle Tool Calls
-
+print(
+    prompt(
+        "Find me interesting CTO or Director of Engineering roles, "
+        "preferably with Python and JavaScript, preferably in EdTech",
+        tools=tool_definitions,
+        model="qwen/qwen3-32b",
+    )
+)

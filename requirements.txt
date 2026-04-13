@@ -1,0 +1,9 @@
+openai>=1.0
+langfuse>=2.59
+python-dotenv>=1.0
+tavily-python>=0.7
+psycopg[binary]>=3.2
+numpy>=1.26
+pgvector>=0.3.0
+mlx>=0.21
+mlx-lm>=0.21

@@ -7,10 +7,12 @@ from conversation_limits import (
     chat_completion_create_with_retry,
     effective_max_request_json_chars,
     get_chat_model_limits,
+    groq_plan_tier,
     maybe_throttle_between_rounds,
     serialized_messages_size,
     shrink_messages_for_request,
 )
+from langfuse_tracing import trace_agent_session
 from tools import handle_tool_calls, tool_definitions
 
 logger = logging.getLogger("intro_agents.prompting")
@@ -31,41 +33,67 @@ client = OpenAI(
 
 messages = []
 
-def prompt(input_prompt,model="openai/gpt-oss-20b",tools=[]):
+
+def reset_conversation() -> None:
+    """Clear chat history for a fresh agent run (e.g. pipeline orchestration)."""
+    messages.clear()
+
+
+def prompt(input_prompt, model="openai/gpt-oss-20b", tools=None):
+    active_tools = tools if tools is not None else tool_definitions
     limits = get_chat_model_limits(model)
+
     if limits:
-        logger.info("Using Groq published limits for %s: %s", model, limits)
-    messages.append({
-        "role": "user",
-        "content": input_prompt
-    })
-    while True:
-        maybe_throttle_between_rounds()
-        shrink_messages_for_request(
-            messages,
-            max_json_chars=effective_max_request_json_chars(model),
+        logger.info(
+            "Using Groq limits (tier=%s) for %s: %s",
+            groq_plan_tier(),
+            model,
+            limits,
         )
-        completion_kwargs = {
-            "model": model,
-            "messages": messages,
-            "tools": tool_definitions,
+    messages.append(
+        {
+            "role": "user",
+            "content": input_prompt,
         }
-        if MAX_COMPLETION_TOKENS > 0:
-            completion_kwargs["max_tokens"] = MAX_COMPLETION_TOKENS
-        response = chat_completion_create_with_retry(
-            client,
-            **completion_kwargs,
-        )
-        assistant_message = response.choices[0].message
-        messages.append(_assistant_message_for_api(assistant_message))
+    )
 
-        tool_results = handle_tool_calls(response)
-        if not tool_results:
-            return assistant_message.content or ""
+    with trace_agent_session(
+        "executive_hiring_research_agent",
+        model=model,
+        tool_count=len(active_tools),
+    ):
+        while True:
+            maybe_throttle_between_rounds()
 
-        messages.extend(tool_results)
-        logger.debug(
-            "Extended conversation with %d tool result(s); serialized messages ~%d chars",
-            len(tool_results),
-            serialized_messages_size(messages),
-        )
+            shrink_messages_for_request(
+                messages,
+                max_json_chars=effective_max_request_json_chars(model),
+            )
+
+            completion_kwargs = {
+                "model": model,
+                "messages": messages,
+                "tools": active_tools,
+            }
+
+            if MAX_COMPLETION_TOKENS > 0:
+                completion_kwargs["max_tokens"] = MAX_COMPLETION_TOKENS
+
+            response = chat_completion_create_with_retry(
+                client,
+                **completion_kwargs,
+            )
+
+            assistant_message = response.choices[0].message
+            messages.append(_assistant_message_for_api(assistant_message))
+
+            tool_results = handle_tool_calls(response)
+            if not tool_results:
+                return assistant_message.content or ""
+
+            messages.extend(tool_results)
+            logger.debug(
+                "Extended conversation with %d tool result(s); serialized messages ~%d chars",
+                len(tool_results),
+                serialized_messages_size(messages),
+            )

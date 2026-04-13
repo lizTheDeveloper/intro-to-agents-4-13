@@ -11,6 +11,8 @@ from typing import Any, Mapping, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, OpenAIError, RateLimitError
 
+from langfuse_tracing import observe_groq_chat_completion_with_raw_response
+
 logger = logging.getLogger("intro_agents.conversation_limits")
 
 
@@ -63,8 +65,11 @@ def _parse_groq_table_int(cell: str) -> Optional[int]:
         return None
 
 
-# Groq Developer-plan defaults (console.groq.com/docs/rate-limits). Org-specific limits may differ.
-GROQ_CHAT_MODEL_LIMITS: dict[str, dict[str, Optional[int]]] = {
+# Groq chat model limits: two tiers selected by GROQ_PLAN (or GROQ_RATE_LIMIT_TIER).
+# Defaults are conservative (free). Set GROQ_PLAN=dev for Developer / paid console limits.
+# Values are RPM, RPD, TPM, TPD (None = not published / not used for chat sizing). Org limits may differ.
+
+GROQ_CHAT_MODEL_LIMITS_FREE: dict[str, dict[str, Optional[int]]] = {
     "allam-2-7b": {"rpm": 30, "rpd": _parse_groq_table_int("7K"), "tpm": 6000, "tpd": 500_000},
     "canopylabs/orpheus-arabic-saudi": {"rpm": 10, "rpd": 100, "tpm": 1200, "tpd": 3600},
     "canopylabs/orpheus-v1-english": {"rpm": 10, "rpd": 100, "tpm": 1200, "tpd": 3600},
@@ -83,9 +88,60 @@ GROQ_CHAT_MODEL_LIMITS: dict[str, dict[str, Optional[int]]] = {
     "qwen/qwen3-32b": {"rpm": 60, "rpd": 1000, "tpm": 6000, "tpd": 500_000},
 }
 
+# Developer plan (Groq console published caps; TPM/RPD as in product table; TPD often unset for chat).
+GROQ_CHAT_MODEL_LIMITS_DEV: dict[str, dict[str, Optional[int]]] = {
+    "allam-2-7b": {"rpm": 300, "rpd": 60_000, "tpm": 60_000, "tpd": None},
+    "canopylabs/orpheus-arabic-saudi": {"rpm": 250, "rpd": 100_000, "tpm": 50_000, "tpd": None},
+    "canopylabs/orpheus-v1-english": {"rpm": 250, "rpd": 100_000, "tpm": 50_000, "tpd": None},
+    "groq/compound": {"rpm": 200, "rpd": 20_000, "tpm": 200_000, "tpd": None},
+    "groq/compound-mini": {"rpm": 200, "rpd": 20_000, "tpm": 200_000, "tpd": None},
+    "llama-3.1-8b-instant": {"rpm": 1000, "rpd": 500_000, "tpm": 250_000, "tpd": None},
+    "llama-3.3-70b-versatile": {"rpm": 1000, "rpd": 500_000, "tpm": 300_000, "tpd": None},
+    "meta-llama/llama-4-scout-17b-16e-instruct": {"rpm": 1000, "rpd": 500_000, "tpm": 300_000, "tpd": None},
+    "meta-llama/llama-prompt-guard-2-22m": {"rpm": 100, "rpd": 50_000, "tpm": 30_000, "tpd": None},
+    "meta-llama/llama-prompt-guard-2-86m": {"rpm": 100, "rpd": 50_000, "tpm": 30_000, "tpd": None},
+    "moonshotai/kimi-k2-instruct": {"rpm": 1000, "rpd": 500_000, "tpm": 250_000, "tpd": None},
+    "moonshotai/kimi-k2-instruct-0905": {"rpm": 1000, "rpd": 500_000, "tpm": 250_000, "tpd": None},
+    "openai/gpt-oss-120b": {"rpm": 1000, "rpd": 500_000, "tpm": 250_000, "tpd": None},
+    "openai/gpt-oss-20b": {"rpm": 1000, "rpd": 500_000, "tpm": 250_000, "tpd": None},
+    "openai/gpt-oss-safeguard-20b": {"rpm": 1000, "rpd": 500_000, "tpm": 150_000, "tpd": None},
+    "qwen/qwen3-32b": {"rpm": 1000, "rpd": 500_000, "tpm": 300_000, "tpd": None},
+    # Whisper: RPM/RPD from table; TPM column “-”; use ASH-style ceiling for request-size heuristics only.
+    "whisper-large-v3": {"rpm": 300, "rpd": 200_000, "tpm": 200_000, "tpd": None},
+    "whisper-large-v3-turbo": {"rpm": 400, "rpd": 200_000, "tpm": 400_000, "tpd": None},
+}
+
+_GROQ_PLAN_LOGGED: Optional[str] = None
+
+
+def groq_plan_tier() -> str:
+    """
+    Rate-limit tier for built-in Groq model tables.
+
+    ``GROQ_PLAN`` or ``GROQ_RATE_LIMIT_TIER``: ``free`` (default), ``dev`` / ``developer`` / ``paid``.
+    """
+    raw = (os.environ.get("GROQ_PLAN") or os.environ.get("GROQ_RATE_LIMIT_TIER") or "free").strip().lower()
+    if raw in ("dev", "developer", "paid", "pro", "business"):
+        return "dev"
+    return "free"
+
+
+def active_groq_chat_model_limits() -> dict[str, dict[str, Optional[int]]]:
+    return GROQ_CHAT_MODEL_LIMITS_DEV if groq_plan_tier() == "dev" else GROQ_CHAT_MODEL_LIMITS_FREE
+
 
 def get_chat_model_limits(model_id: str) -> Optional[dict[str, Optional[int]]]:
-    return GROQ_CHAT_MODEL_LIMITS.get(model_id.strip())
+    global _GROQ_PLAN_LOGGED
+    mid = model_id.strip()
+    tier = groq_plan_tier()
+    primary = GROQ_CHAT_MODEL_LIMITS_DEV if tier == "dev" else GROQ_CHAT_MODEL_LIMITS_FREE
+    fallback = GROQ_CHAT_MODEL_LIMITS_FREE if tier == "dev" else GROQ_CHAT_MODEL_LIMITS_DEV
+    if _GROQ_PLAN_LOGGED != tier:
+        _GROQ_PLAN_LOGGED = tier
+        logger.info("Groq rate-limit tier=%s (set GROQ_PLAN=dev for Developer plan caps)", tier)
+    if mid in primary:
+        return primary[mid]
+    return fallback.get(mid)
 
 
 def effective_max_request_json_chars(model_id: Optional[str]) -> int:
@@ -298,11 +354,11 @@ def chat_completion_create_with_retry(
     attempt = 0
     while True:
         try:
-            raw = client.chat.completions.with_raw_response.create(**kwargs)
-            headers = getattr(raw, "headers", None)
-            if headers is not None:
-                note_chat_completion_headers(headers)
-            completion = raw.parse()
+            completion = observe_groq_chat_completion_with_raw_response(
+                client,
+                note_headers=note_chat_completion_headers,
+                **kwargs,
+            )
             return completion
         except OpenAIError as exc:
             if attempt >= max_retries or not _is_retryable_error(exc):

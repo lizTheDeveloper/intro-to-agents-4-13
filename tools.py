@@ -1,4 +1,5 @@
 # To install: pip install tavily-python
+import inspect
 import json
 import logging
 import os
@@ -6,27 +7,25 @@ import os
 from tavily import TavilyClient
 
 from conversation_limits import TOOL_RESULT_MAX_CHARS, truncate_with_notice
+from hiring_intel_tools import HIRING_INTEL_HANDLERS, HIRING_INTEL_TOOL_DEFINITIONS
+from langfuse_tracing import trace_tool_execution
+from tool_spec import function_tool as _function_tool
 
 logger = logging.getLogger("intro_agents.tools")
 
-client = TavilyClient(os.environ.get("TAVILY_API_KEY"))
+_tavily_client = None
+
+
+def _get_tavily_client() -> TavilyClient:
+    global _tavily_client
+    if _tavily_client is None:
+        _tavily_client = TavilyClient(os.environ.get("TAVILY_API_KEY"))
+    return _tavily_client
 
 _TAVILY_MAX_RESULTS = max(1, int(os.environ.get("AGENT_TAVILY_MAX_RESULTS", "6")))
 _TAVILY_SEARCH_DEPTH = os.environ.get("AGENT_TAVILY_SEARCH_DEPTH", "basic")
 _TAVILY_SNIPPET_CHARS = max(200, int(os.environ.get("AGENT_TAVILY_CONTENT_PER_RESULT_CHARS", "900")))
 _TAVILY_TOP_LEVEL_CHARS = max(500, int(os.environ.get("AGENT_TAVILY_TOP_LEVEL_TEXT_CHARS", "4000")))
-
-
-# Chat Completions shape (Groq/OpenAI-compatible): name lives under "function".
-def _function_tool(name, description, parameters):
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-        },
-    }
 
 
 tool_definitions = [
@@ -104,7 +103,7 @@ tool_definitions = [
             "required": ["task"],
         },
     ),
-]
+] + HIRING_INTEL_TOOL_DEFINITIONS
 
 
 def _compact_tavily_payload(payload):
@@ -139,7 +138,7 @@ def _compact_tavily_payload(payload):
 
 
 def tavily_search(query):
-    response = client.search(
+    response = _get_tavily_client().search(
         query=query,
         search_depth=_TAVILY_SEARCH_DEPTH,
         max_results=_TAVILY_MAX_RESULTS,
@@ -148,21 +147,20 @@ def tavily_search(query):
     return _compact_tavily_payload(response)
 
 def tavily_extract(url):
-    response = client.extract(url)
+    response = _get_tavily_client().extract(url)
     return _compact_tavily_payload(response)
 
 def tavily_crawl(url,instructions):
-    response = client.crawl(url, instructions=instructions)
+    response = _get_tavily_client().crawl(url, instructions=instructions)
     return _compact_tavily_payload(response)
 
 def tavily_map(url):
-    response = client.map(url)
+    response = _get_tavily_client().map(url)
     return _compact_tavily_payload(response)
 
 def tavily_research(task):
-    response = client.research(task)
+    response = _get_tavily_client().research(task)
     return _compact_tavily_payload(response)
-
 
 
 available_functions = {
@@ -171,7 +169,28 @@ available_functions = {
     "web_crawl": tavily_crawl,
     "web_map": tavily_map,
     "web_research": tavily_research,
+    **HIRING_INTEL_HANDLERS,
 }
+
+def _filter_call_args(callable_obj, raw_args: dict) -> dict:
+    """Drop kwargs the LLM invented so Python handlers do not raise TypeError."""
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return raw_args
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return raw_args
+    filtered = {name: raw_args[name] for name in parameters if name in raw_args}
+    dropped = set(raw_args) - set(filtered)
+    if dropped:
+        logger.debug(
+            "Ignoring unknown parameters for %s: %s",
+            getattr(callable_obj, "__name__", repr(callable_obj)),
+            sorted(dropped),
+        )
+    return filtered
+
 
 def _resolve_function_name(requested_name: str) -> str:
     if requested_name in available_functions:
@@ -184,10 +203,11 @@ def _resolve_function_name(requested_name: str) -> str:
 
 
 def execute_tool_call(tool_call):
-    """Parse and execute a single tool call"""
+    """Parse and execute a single tool call, returning JSON string result."""
     try:
         function_name = _resolve_function_name(tool_call.function.name)
     except LookupError:
+        logger.warning("Unknown tool requested: %s", tool_call.function.name)
         return json.dumps(
             {
                 "error": "unknown_tool",
@@ -196,15 +216,37 @@ def execute_tool_call(tool_call):
             }
         )
     function_to_call = available_functions[function_name]
-    function_args = json.loads(tool_call.function.arguments)
-    results = function_to_call(**function_args)
-    if isinstance(results, dict):
-        results = _compact_tavily_payload(results)
-    if isinstance(results, (dict, list)):
-        text = json.dumps(results, ensure_ascii=False)
-    else:
-        text = str(results)
-    return truncate_with_notice(text, TOOL_RESULT_MAX_CHARS)
+    try:
+        function_args = json.loads(tool_call.function.arguments)
+    except (json.JSONDecodeError, TypeError) as parse_err:
+        logger.error("Failed to parse arguments for %s: %s", function_name, parse_err)
+        return json.dumps({"error": "argument_parse_failure", "tool": function_name, "detail": str(parse_err)})
+    if not isinstance(function_args, dict):
+        function_args = {}
+    with trace_tool_execution(function_name, function_args) as tool_span:
+        try:
+            results = function_to_call(**_filter_call_args(function_to_call, function_args))
+        except Exception as tool_err:
+            logger.error("Tool %s raised exception: %s", function_name, tool_err, exc_info=True)
+            if tool_span is not None:
+                tool_span.update(level="ERROR", status_message=str(tool_err)[:4000])
+            return json.dumps({"error": "tool_execution_failed", "tool": function_name, "detail": str(tool_err)[:2000]})
+        if isinstance(results, dict):
+            results = _compact_tavily_payload(results)
+        if isinstance(results, (dict, list)):
+            text = json.dumps(results, ensure_ascii=False, default=str)
+        else:
+            text = str(results)
+        truncated = truncate_with_notice(text, TOOL_RESULT_MAX_CHARS)
+        if tool_span is not None:
+            preview_limit = 8000
+            tool_span.update(
+                output={
+                    "truncated_to_chars": len(truncated),
+                    "result": truncated if len(truncated) <= preview_limit else truncated[:preview_limit],
+                }
+            )
+        return truncated
 
 
 def handle_tool_calls(response):
@@ -222,5 +264,4 @@ def handle_tool_calls(response):
         }
         tool_responses.append(tool_message)
     return tool_responses
-            
             
