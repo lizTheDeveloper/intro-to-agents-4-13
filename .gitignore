@@ -1,1 +1,10 @@
 .env
+.env.*
+
+__pycache__/
+*.py[cod]
+.Python
+env/
+.venv/
+
+.DS_Store

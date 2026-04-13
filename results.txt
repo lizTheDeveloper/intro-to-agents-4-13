@@ -1,0 +1,48 @@
+
+Response(
+    id='resp_01kp41xyveewvva3qnkgxx2bhg', 
+    created_at=1776105225.0, 
+    error=None, 
+    incomplete_details=None, 
+    instructions=None, 
+    metadata={}, 
+    model='openai/gpt-oss-20b', 
+    object='response', 
+    output=[
+        ResponseReasoningItem(
+            id='resp_01kp41xyveeww8mpbkdeq7gbny', 
+            summary=[], 
+            type='reasoning', 
+            content=[
+                Content(
+                    text='User wants: "Find me interesting CTO or Director of Engineering roles, preferably with Python and JavaScript, preferably in EdTech". They want job listings? We can search web. Use web_search. Probably multiple results. Let\'s search.', type='reasoning_text')], encrypted_content=None, status='completed'),
+        ResponseFunctionToolCall(
+            arguments='{"query":"CTO Director of Engineering Python JavaScript EdTech job listings"}', 
+                    call_id='fc_26958b5b-3332-43f7-b18b-756a2abfbe0e', 
+                    name='web_search', 
+                    type='function_call', 
+                    id='fc_26958b5b-3332-43f7-b18b-756a2abfbe0e', 
+                    namespace=None, 
+                    status='completed')], 
+                    parallel_tool_calls=True, 
+                    temperature=1.0, 
+                    tool_choice='auto', 
+                    tools=[
+                        FunctionTool(name='web_search', 
+                        parameters={
+                            'properties': {'query': {'description': 'The web search query to perform', 'type': 'string'}}, 'required': ['query'], 'type': 'object'}, strict=False, type='function', defer_loading=None, description='Search the web using Tavily'), 
+                        FunctionTool(name='web_extract', parameters={'properties': {'url': {'description': 'The URL of the page to extract content from', 'type': 'string'}}, 'required': ['url'], 'type': 'object'}, strict=False, type='function', defer_loading=None, description='Extract clean, structured text content from one or more web page URLs using Tavily'), 
+                        FunctionTool(name='web_crawl', parameters={'properties': {'instructions': {'description': 'Natural-language instructions describing what to crawl for or which pages to prioritize', 'type': 'string'}, 'url': {'description': 'The starting URL for the crawl', 'type': 'string'}}, 'required': ['url', 'instructions'], 'type': 'object'}, strict=False, type='function', defer_loading=None, description='Crawl a website starting from a URL, following links according to natural-language instructions, using Tavily'), 
+                        FunctionTool(name='web_map', parameters={'properties': {'url': {'description': 'The root or entry URL to map from', 'type': 'string'}}, 'required': ['url'], 'type': 'object'}, strict=False, type='function', defer_loading=None, description='Discover and list URLs reachable from a site (site map / link discovery) using Tavily'), 
+                        FunctionTool(name='web_research', parameters={'properties': {'task': {'description': 'The research question, topic, or task to investigate in depth', 'type': 'string'}}, 'required': ['task'], 'type': 'object'}, strict=False, type='function', defer_loading=None, description='Run a multi-step Tavily research job for a complex question or task and return synthesized findings')], 
+                    top_p=1.0, 
+                    background=False, 
+                    completed_at=None, 
+                    conversation=None, 
+                    max_output_tokens=None, 
+                    max_tool_calls=None, 
+                    previous_response_id=None, 
+                    prompt=None, 
+                    prompt_cache_key=None, 
+                    prompt_cache_retention=None, 
+                    reasoning=Reasoning(effort='medium', generate_summary=None, summary=None), safety_identifier=None, service_tier='default', status='completed', text=ResponseTextConfig(format=ResponseFormatText(type='text'), verbosity=None), top_logprobs=None, truncation='disabled', usage=ResponseUsage(input_tokens=342, input_tokens_details=InputTokensDetails(cached_tokens=0), output_tokens=82, output_tokens_details=OutputTokensDetails(reasoning_tokens=48), total_tokens=424), user=None, groq=None, store=False)
